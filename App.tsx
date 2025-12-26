@@ -192,11 +192,15 @@ const App: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
+      if (!navigator.onLine) {
+        throw new Error("لا يوجد اتصال بالإنترنت حالياً. يرجى التحقق من الشبكة.");
+      }
       const newTransactions = await parseFinancialText(inputText);
       setTransactions(prev => [...prev, ...newTransactions]);
       setInputText('');
     } catch (err: any) {
-      setError(err.message || 'خطأ في التحليل، يرجى المحاولة لاحقاً');
+      console.error("Processing Error:", err);
+      setError(err.message || 'خطأ في الاتصال، يرجى التأكد من توفر الإنترنت والمحاولة لاحقاً');
     } finally {
       setLoading(false);
     }
@@ -302,6 +306,12 @@ const App: React.FC = () => {
     a.href = url;
     a.download = `backup_smart_accountant_${Date.now()}.json`;
     a.click();
+  };
+
+  const handleCopyDonation = () => {
+    const donationAcc = "0992262993";
+    navigator.clipboard.writeText(donationAcc);
+    alert('✅ تم نسخ رقم حساب الكاش الخاص بالمطور بنجاح.');
   };
 
   const handleWhatsAppDonationMessage = () => {
@@ -436,7 +446,7 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          {/* UPDATED: Donation/Support Card - Removed number, updated labels to Sham Cash */}
+          {/* UPDATED: Donation/Support Card */}
           <div className="bg-white rounded-[2.5rem] p-8 shadow-luxury border border-slate-200/50 hover:border-indigo-200 transition-all group relative overflow-hidden">
             <div className="absolute -top-10 -left-10 w-24 h-24 bg-rose-50 rounded-full blur-2xl group-hover:bg-rose-100 transition-colors"></div>
             <h2 className="text-lg font-black text-slate-800 flex items-center gap-3 mb-6 relative z-10">

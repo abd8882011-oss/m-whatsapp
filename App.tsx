@@ -1,6 +1,7 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { parseFinancialText } from './geminiService';
+import { cloudService } from './dbService';
 import { Transaction, TransactionType, ExchangeRates, CurrencySummary } from './types';
 import { 
   ArrowDownCircle, 
@@ -31,10 +32,16 @@ import {
   UserPlus,
   Users,
   UserCog,
-  ShieldAlert,
   MessageCircle,
   ExternalLink,
-  Crown
+  Crown,
+  Cloud,
+  CloudOff,
+  CloudSync,
+  Save,
+  ChevronRight,
+  TrendingUp,
+  PieChart
 } from 'lucide-react';
 
 interface UserAccount {
@@ -46,10 +53,12 @@ interface UserAccount {
 }
 
 const App: React.FC = () => {
+  // الحساب الافتراضي للمسؤول (الأستاذ عبد الرزاق الموسى)
   const DEFAULT_ADMIN = { id: 'admin-0', username: 'abd999', password: '732234', role: 'admin' as const };
 
+  // حالات المستخدمين والمصادقة
   const [users, setUsers] = useState<UserAccount[]>(() => {
-    const saved = localStorage.getItem('user_accounts_v2');
+    const saved = localStorage.getItem('user_accounts_v3');
     if (saved) return JSON.parse(saved);
     return [DEFAULT_ADMIN];
   });
@@ -57,6 +66,7 @@ const App: React.FC = () => {
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(() => {
     return localStorage.getItem('isLoggedIn') === 'true';
   });
+  
   const [currentUserId, setCurrentUserId] = useState<string>(() => {
     return localStorage.getItem('currentUserId') || '';
   });
@@ -65,6 +75,7 @@ const App: React.FC = () => {
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
 
+  // حالات لوحة التحكم والتطبيق
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [newAccount, setNewAccount] = useState<Omit<UserAccount, 'id' | 'activeSessionId'>>({ username: '', password: '', role: 'user' });
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
@@ -79,22 +90,18 @@ const App: React.FC = () => {
 
   const [inputText, setInputText] = useState('');
   const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [cloudStatus, setCloudStatus] = useState<'idle' | 'synced' | 'error' | 'connected'>('idle');
   const [error, setError] = useState<string | null>(null);
   
   const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
-  const [pendingRestoreData, setPendingRestoreData] = useState<{
-    transactions: Transaction[];
-    exchangeRates: ExchangeRates;
-    count: number;
-    date: string;
-  } | null>(null);
-
+  
   const fileInputRef = useRef<HTMLInputElement>(null);
   const reportRef = useRef<HTMLDivElement>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValues, setEditValues] = useState<Transaction | null>(null);
 
+  // معرف الجلسة الفريد لهذه النافذة لمنع الدخول المتعدد
   const [mySessionId] = useState<string>(() => {
     const existing = sessionStorage.getItem('mySessionId');
     if (existing) return existing;
@@ -103,55 +110,75 @@ const App: React.FC = () => {
     return newId;
   });
 
+  // --- نظام أمان الجلسات ومنع الدخول المزدوج ---
   useEffect(() => {
     if (!isLoggedIn || !currentUserId) return;
-    const checkSession = () => {
-      const latestUsersRaw = localStorage.getItem('user_accounts_v2');
+
+    const checkSecurity = () => {
+      const latestUsersRaw = localStorage.getItem('user_accounts_v3');
       if (latestUsersRaw) {
         const latestUsers: UserAccount[] = JSON.parse(latestUsersRaw);
         const me = latestUsers.find(u => u.id === currentUserId);
+        
         if (me && me.activeSessionId && me.activeSessionId !== mySessionId) {
           handleLogout();
-          setLoginError('تم تسجيل الخروج لأن الحساب سجل دخوله من نافذة أو جهاز آخر');
+          alert('تنبيه أمني: تم اكتشاف دخول لهذا الحساب من جهاز أو نافذة أخرى. تم تسجيل الخروج تلقائياً.');
         }
       }
     };
-    const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === 'user_accounts_v2') checkSession();
-    };
-    window.addEventListener('storage', handleStorageChange);
-    const interval = setInterval(checkSession, 2000);
-    return () => {
-      window.removeEventListener('storage', handleStorageChange);
-      clearInterval(interval);
-    };
+
+    const interval = setInterval(checkSecurity, 4000);
+    return () => clearInterval(interval);
   }, [isLoggedIn, currentUserId, mySessionId]);
 
+  // --- مزامنة البيانات السحابية مع Neon PostgreSQL عبر Vercel API ---
+  const handleCloudSync = async () => {
+    if (!currentUserId) return;
+    setSyncing(true);
+    try {
+      const success = await cloudService.syncTransactions(currentUserId, transactions);
+      if (success) {
+        setCloudStatus('synced');
+        setTimeout(() => setCloudStatus('connected'), 3000);
+      } else {
+        setCloudStatus('error');
+      }
+    } catch (e) {
+      setCloudStatus('error');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // جلب البيانات الأولية
   useEffect(() => {
     if (isLoggedIn && currentUserId) {
       const savedTransactions = localStorage.getItem(`transactions_${currentUserId}`);
       const savedRates = localStorage.getItem(`exchangeRates_${currentUserId}`);
-      setTransactions(savedTransactions ? JSON.parse(savedTransactions) : []);
+      
+      if (savedTransactions) setTransactions(JSON.parse(savedTransactions));
       if (savedRates) setExchangeRates(JSON.parse(savedRates));
-      else setExchangeRates({ 'USD': 1, 'TRY': 34.50, 'SYP': 14500 });
+
+      // محاولة الجلب من السحاب (Neon) لتحديث البيانات المحلية
+      setCloudStatus('idle');
+      cloudService.fetchUserData(currentUserId).then(cloudData => {
+        if (cloudData) {
+          setTransactions(cloudData.transactions);
+          setExchangeRates(cloudData.rates);
+          setCloudStatus('connected');
+        }
+      }).catch(() => setCloudStatus('error'));
     }
   }, [currentUserId, isLoggedIn]);
 
+  // حفظ البيانات محلياً عند التغيير
   useEffect(() => {
     if (isLoggedIn && currentUserId) {
       localStorage.setItem(`transactions_${currentUserId}`, JSON.stringify(transactions));
-    }
-  }, [transactions, currentUserId, isLoggedIn]);
-
-  useEffect(() => {
-    if (isLoggedIn && currentUserId) {
       localStorage.setItem(`exchangeRates_${currentUserId}`, JSON.stringify(exchangeRates));
+      localStorage.setItem('user_accounts_v3', JSON.stringify(users));
     }
-  }, [exchangeRates, currentUserId, isLoggedIn]);
-
-  useEffect(() => {
-    localStorage.setItem('user_accounts_v2', JSON.stringify(users));
-  }, [users]);
+  }, [transactions, exchangeRates, users, currentUserId, isLoggedIn]);
 
   const currentUser = useMemo(() => users.find(u => u.id === currentUserId), [users, currentUserId]);
   const isAdmin = currentUser?.role === 'admin';
@@ -159,23 +186,27 @@ const App: React.FC = () => {
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
-    const foundUserIndex = users.findIndex(u => u.username === loginUsername && u.password === loginPassword);
-    if (foundUserIndex !== -1) {
+    const foundIndex = users.findIndex(u => u.username === loginUsername && u.password === loginPassword);
+    
+    if (foundIndex !== -1) {
       const updatedUsers = [...users];
-      updatedUsers[foundUserIndex] = { ...updatedUsers[foundUserIndex], activeSessionId: mySessionId };
+      updatedUsers[foundIndex] = { ...updatedUsers[foundIndex], activeSessionId: mySessionId };
       setUsers(updatedUsers);
       setIsLoggedIn(true);
-      setCurrentUserId(updatedUsers[foundUserIndex].id);
+      setCurrentUserId(updatedUsers[foundIndex].id);
       localStorage.setItem('isLoggedIn', 'true');
-      localStorage.setItem('currentUserId', updatedUsers[foundUserIndex].id);
+      localStorage.setItem('currentUserId', updatedUsers[foundIndex].id);
+      localStorage.setItem('user_accounts_v3', JSON.stringify(updatedUsers));
     } else {
-      setLoginError('اسم المستخدم أو كلمة المرور غير صحيحة');
+      setLoginError('اسم المستخدم أو كلمة المرور غير صحيحة.');
     }
   };
 
   const handleLogout = () => {
     if (currentUserId) {
-      setUsers(prev => prev.map(u => u.id === currentUserId ? { ...u, activeSessionId: undefined } : u));
+      const updatedUsers = users.map(u => u.id === currentUserId ? { ...u, activeSessionId: undefined } : u);
+      setUsers(updatedUsers);
+      localStorage.setItem('user_accounts_v3', JSON.stringify(updatedUsers));
     }
     setIsLoggedIn(false);
     localStorage.removeItem('isLoggedIn');
@@ -184,104 +215,6 @@ const App: React.FC = () => {
     setLoginUsername('');
     setLoginPassword('');
     setShowAdminPanel(false);
-  };
-
-  const handleAddUser = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newAccount.username || !newAccount.password) return;
-    const userToAdd: UserAccount = { ...newAccount, id: `user-${Date.now()}` };
-    setUsers(prev => [...prev, userToAdd]);
-    setNewAccount({ username: '', password: '', role: 'user' });
-  };
-
-  const handleDeleteUser = (userId: string) => {
-    if (userId === currentUserId) {
-      alert("لا يمكنك حذف حسابك الحالي أثناء تسجيل الدخول");
-      return;
-    }
-    const adminsCount = users.filter(u => u.role === 'admin').length;
-    const userToDelete = users.find(u => u.id === userId);
-    if (userToDelete?.role === 'admin' && adminsCount <= 1) {
-      alert("يجب أن يبقى مسؤول واحد على الأقل في النظام");
-      return;
-    }
-    if (confirm(`هل أنت متأكد من حذف حساب المستخدم: ${userToDelete?.username}؟`)) {
-      setUsers(prev => prev.filter(u => u.id !== userId));
-      localStorage.removeItem(`transactions_${userId}`);
-      localStorage.removeItem(`exchangeRates_${userId}`);
-    }
-  };
-
-  const startUserEdit = (user: UserAccount) => {
-    setEditingUserId(user.id);
-    setUserEditValues({ ...user });
-  };
-
-  const saveUserEdit = () => {
-    if (userEditValues) {
-      const adminsCount = users.filter(u => u.role === 'admin').length;
-      if (userEditValues.id === currentUserId && userEditValues.role === 'user' && adminsCount <= 1) {
-        alert("لا يمكنك إلغاء صلاحيات المسؤول عن نفسك لأنه لا يوجد مسؤول آخر");
-        return;
-      }
-      setUsers(prev => prev.map(u => u.id === userEditValues.id ? userEditValues : u));
-      setEditingUserId(null);
-      setUserEditValues(null);
-    }
-  };
-
-  const handleExportBackup = () => {
-    const backupData = { transactions, exchangeRates, exportDate: new Date().toISOString(), owner: currentUser?.username };
-    const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `نسخة_احتياطية_${currentUser?.username}_${new Date().toLocaleDateString('ar-EG').replace(/\//g, '-')}.json`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleImportBackup = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const content = e.target?.result as string;
-        const data = JSON.parse(content);
-        if (data.transactions && data.exchangeRates) {
-          setPendingRestoreData({ transactions: data.transactions, exchangeRates: data.exchangeRates, count: data.transactions.length, date: data.exportDate || new Date().toISOString() });
-          setShowRestoreConfirm(true);
-        } else { setError('ملف غير صالح'); }
-      } catch (err) { setError('خطأ في قراءة الملف'); }
-    };
-    reader.readAsText(file);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const executeRestore = () => {
-    if (pendingRestoreData) {
-      setTransactions(pendingRestoreData.transactions);
-      setExchangeRates(pendingRestoreData.exchangeRates);
-      setShowRestoreConfirm(false);
-      setPendingRestoreData(null);
-    }
-  };
-
-  const handleRateChange = (currency: string, value: string) => {
-    const rate = parseFloat(value);
-    if (!isNaN(rate)) setExchangeRates(prev => ({ ...prev, [currency]: rate }));
-  };
-
-  const addNewCurrency = () => {
-    const currency = prompt('أدخل رمز العملة الجديد (مثال: EUR, AED):');
-    if (currency) {
-      const upper = currency.trim().toUpperCase();
-      if (upper && !exchangeRates[upper]) setExchangeRates(prev => ({ ...prev, [upper]: 1 }));
-      else if (upper) alert('العملة موجودة بالفعل');
-    }
   };
 
   const summaries = useMemo(() => {
@@ -308,58 +241,103 @@ const App: React.FC = () => {
       const newTransactions = await parseFinancialText(inputText);
       setTransactions(prev => [...prev, ...newTransactions]);
       setInputText('');
-    } catch (err: any) { setError(err.message || 'حدث خطأ أثناء معالجة النص'); }
-    finally { setLoading(false); }
+      // المزامنة التلقائية مع السحاب بعد الإضافة بنجاح
+      handleCloudSync();
+    } catch (err: any) {
+      setError(err.message || 'حدث خطأ أثناء تحليل النص المالي.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleDownloadPDF = () => {
     if (!reportRef.current) return;
-    const filename = `تقرير_${currentUser?.username}_${Date.now()}.pdf`;
-    const opt = { margin: [15, 15, 15, 15], filename, image: { type: 'jpeg', quality: 0.98 }, html2canvas: { scale: 2, useCORS: true }, jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' } };
+    const opt = {
+      margin: 10,
+      filename: `تقرير_مالي_${currentUser?.username}_${new Date().toLocaleDateString('ar-EG')}.pdf`,
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2, useCORS: true },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+    };
     // @ts-ignore
-    window.html2pdf().set(opt).from(reportRef.current).save();
+    html2pdf().set(opt).from(reportRef.current).save();
   };
 
   const handleDownloadExcel = () => {
-    if (transactions.length === 0) return;
+    const data = transactions.map(t => ({
+      'الحالة': t.type === TransactionType.INCOMING ? 'له (وارد)' : 'عليه (صادر)',
+      'المبلغ': t.amount,
+      'العملة': t.currency,
+      'البيان': t.description,
+      'التاريخ': new Date().toLocaleDateString('ar-EG')
+    }));
+    // @ts-ignore
+    const ws = XLSX.utils.json_to_sheet(data);
     // @ts-ignore
     const wb = XLSX.utils.book_new();
     // @ts-ignore
-    const wsTransactions = XLSX.utils.json_to_sheet(transactions.map(t => ({ 'النوع': t.type, 'المبلغ': t.amount, 'العملة': t.currency, 'الوصف': t.description })));
+    XLSX.utils.book_append_sheet(wb, ws, "Transactions");
     // @ts-ignore
-    XLSX.utils.book_append_sheet(wb, wsTransactions, "الحركات");
-    // @ts-ignore
-    XLSX.writeFile(wb, `بيانات_${currentUser?.username}.xlsx`);
+    XLSX.writeFile(wb, `كشف_حساب_${currentUser?.username}.xlsx`);
   };
 
   if (!isLoggedIn) {
     return (
-      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
-        <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden border border-slate-200">
-          <div className="bg-emerald-600 p-8 text-center text-white">
-            <div className="bg-white/20 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4"><Calculator className="w-8 h-8" /></div>
-            <h1 className="text-2xl font-bold">تسجيل الدخول</h1>
-            <p className="text-emerald-100 text-sm mt-1">المحاسب الذكي - الأستاذ عبد الرزاق الموسى</p>
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl overflow-hidden border border-slate-200">
+          <div className="bg-emerald-600 p-10 text-center text-white relative">
+            <div className="absolute top-0 right-0 p-4 opacity-10">
+              <Database className="w-20 h-20" />
+            </div>
+            <div className="bg-white/20 w-20 h-20 rounded-3xl rotate-12 flex items-center justify-center mx-auto mb-6 backdrop-blur-md">
+              <Calculator className="w-10 h-10 -rotate-12" />
+            </div>
+            <h1 className="text-3xl font-black mb-2 tracking-tight">المحاسب الذكي</h1>
+            <p className="text-emerald-100 font-medium">بوابة الأستاذ عبد الرزاق الموسى</p>
           </div>
-          <form onSubmit={handleLogin} className="p-8 space-y-6">
+          <form onSubmit={handleLogin} className="p-10 space-y-6">
             <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-600 flex items-center gap-2"><User className="w-4 h-4 text-emerald-600" />اسم المستخدم</label>
-              <input type="text" required value={loginUsername} onChange={(e) => setLoginUsername(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-lg" placeholder="اسم المستخدم" />
+              <label className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                <User className="w-3.5 h-3.5 text-emerald-600" /> اسم المستخدم
+              </label>
+              <input 
+                type="text" 
+                required 
+                value={loginUsername} 
+                onChange={(e) => setLoginUsername(e.target.value)} 
+                className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 transition-all text-lg font-bold" 
+                placeholder="أدخل اسمك" 
+              />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-600 flex items-center gap-2"><Lock className="w-4 h-4 text-emerald-600" />كلمة المرور</label>
-              <input type="password" required value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-emerald-500 transition-all text-lg" placeholder="••••••••" />
+              <label className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                <Lock className="w-3.5 h-3.5 text-emerald-600" /> كلمة المرور
+              </label>
+              <input 
+                type="password" 
+                required 
+                value={loginPassword} 
+                onChange={(e) => setLoginPassword(e.target.value)} 
+                className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 outline-none focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 transition-all text-lg font-bold" 
+                placeholder="••••••••" 
+              />
             </div>
             {loginError && (
-              <div className="flex items-start gap-2 bg-rose-50 p-3 rounded-lg border border-rose-100 text-rose-600 animate-in fade-in slide-in-from-top-1">
-                <AlertTriangle className="w-5 h-5 flex-shrink-0" />
-                <p className="text-sm font-bold leading-tight">{loginError}</p>
+              <div className="p-4 bg-rose-50 text-rose-600 text-sm font-bold rounded-2xl border border-rose-100 flex items-center gap-2 animate-pulse">
+                <AlertTriangle className="w-5 h-5" /> {loginError}
               </div>
             )}
-            <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg active:scale-95">دخول آمن</button>
+            <button 
+              type="submit" 
+              className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-5 rounded-2xl transition-all shadow-xl shadow-emerald-600/20 active:scale-[0.98] text-lg"
+            >
+              تسجيل دخول آمن
+            </button>
           </form>
-          <div className="p-4 bg-slate-50 border-t border-slate-100 text-center">
-            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">جميع الحقوق محفوظة © 2024 - عبد الرزاق الموسى</p>
+          <div className="p-6 bg-slate-50 border-t border-slate-100 text-center">
+            <p className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em]">
+              Copyright © 2024 - Abdul Razzaq Al-Mousa
+            </p>
           </div>
         </div>
       </div>
@@ -367,59 +345,90 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 pb-12">
-      <input type="file" ref={fileInputRef} onChange={handleImportBackup} accept=".json" className="hidden" />
-
+    <div className="min-h-screen bg-[#FDFDFD] text-slate-900 pb-12 font-['Tajawal']">
       {/* Admin Panel Modal */}
       {showAdminPanel && isAdmin && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-md animate-in fade-in duration-200">
-          <div className="bg-white w-full max-w-4xl rounded-[2.5rem] shadow-2xl overflow-hidden border border-slate-200 animate-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
-            <div className="p-8 bg-emerald-700 text-white flex justify-between items-center">
-              <div className="flex items-center gap-3">
-                <UserCog className="w-8 h-8" />
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-lg animate-in fade-in duration-300">
+          <div className="bg-white w-full max-w-4xl rounded-[3rem] shadow-2xl overflow-hidden border border-slate-100 flex flex-col max-h-[90vh] animate-in zoom-in-95 duration-300">
+            <div className="p-10 bg-gradient-to-br from-emerald-600 to-emerald-800 text-white flex justify-between items-center relative">
+               <div className="absolute inset-0 opacity-10 pointer-events-none">
+                 <div className="w-full h-full bg-[url('https://www.transparenttextures.com/patterns/cubes.png')]"></div>
+               </div>
+              <div className="flex items-center gap-5 relative z-10">
+                <div className="bg-white/20 p-4 rounded-3xl backdrop-blur-md">
+                  <UserCog className="w-10 h-10" />
+                </div>
                 <div>
-                  <h2 className="text-2xl font-black">إدارة النظام والمستخدمين</h2>
-                  <p className="text-emerald-100 text-sm">مراقبة الجلسات وتدقيق الحسابات</p>
+                  <h2 className="text-3xl font-black tracking-tight">إدارة النظام</h2>
+                  <p className="text-emerald-100/80 font-medium">التحكم بالمستخدمين وقواعد بيانات Neon</p>
                 </div>
               </div>
-              <button onClick={() => {setShowAdminPanel(false); setEditingUserId(null);}} className="bg-white/20 hover:bg-white/30 p-2 rounded-full transition-all"><X className="w-6 h-6" /></button>
+              <button onClick={() => setShowAdminPanel(false)} className="bg-white/20 hover:bg-white/30 p-3 rounded-full transition-all relative z-10"><X className="w-7 h-7" /></button>
             </div>
-            <div className="flex-1 overflow-y-auto p-8 space-y-8">
-              <div className="bg-slate-50 border border-slate-100 p-6 rounded-3xl">
-                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><UserPlus className="w-5 h-5 text-emerald-600" /> إضافة حساب جديد</h3>
-                <form onSubmit={handleAddUser} className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                  <input type="text" placeholder="اسم المستخدم" className="bg-white border border-slate-200 rounded-xl px-4 py-2 outline-none focus:ring-2 focus:ring-emerald-500 font-bold" value={newAccount.username} onChange={(e) => setNewAccount({...newAccount, username: e.target.value})} />
-                  <input type="text" placeholder="كلمة المرور" className="bg-white border border-slate-200 rounded-xl px-4 py-2 outline-none focus:ring-2 focus:ring-emerald-500 font-bold" value={newAccount.password} onChange={(e) => setNewAccount({...newAccount, password: e.target.value})} />
-                  <select className="bg-white border border-slate-200 rounded-xl px-4 py-2 font-bold" value={newAccount.role} onChange={(e) => setNewAccount({...newAccount, role: e.target.value as 'admin' | 'user'})}>
+            <div className="flex-1 overflow-y-auto p-10 space-y-10">
+              <div className="bg-slate-50 border border-slate-200 p-8 rounded-[2rem]">
+                <h3 className="font-black text-slate-800 mb-6 flex items-center gap-2 text-xl"><UserPlus className="w-6 h-6 text-emerald-600" /> إضافة مستخدم جديد</h3>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!newAccount.username || !newAccount.password) return;
+                  const newUser: UserAccount = { ...newAccount, id: `user-${Date.now()}` };
+                  setUsers(prev => [...prev, newUser]);
+                  setNewAccount({ username: '', password: '', role: 'user' });
+                }} className="grid grid-cols-1 md:grid-cols-4 gap-5">
+                  <input type="text" placeholder="اسم المستخدم" className="bg-white border border-slate-200 rounded-2xl px-5 py-3 outline-none focus:ring-4 focus:ring-emerald-500/10 font-bold" value={newAccount.username} onChange={(e) => setNewAccount({...newAccount, username: e.target.value})} />
+                  <input type="text" placeholder="كلمة المرور" className="bg-white border border-slate-200 rounded-2xl px-5 py-3 outline-none focus:ring-4 focus:ring-emerald-500/10 font-bold" value={newAccount.password} onChange={(e) => setNewAccount({...newAccount, password: e.target.value})} />
+                  <select className="bg-white border border-slate-200 rounded-2xl px-5 py-3 font-bold" value={newAccount.role} onChange={(e) => setNewAccount({...newAccount, role: e.target.value as 'admin' | 'user'})}>
                     <option value="user">مستخدم عادي</option>
                     <option value="admin">مسؤول نظام</option>
                   </select>
-                  <button type="submit" className="bg-emerald-600 text-white font-black rounded-xl py-2 hover:bg-emerald-700 transition-all active:scale-95">إضافة</button>
+                  <button type="submit" className="bg-emerald-600 text-white font-black rounded-2xl py-3 hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-600/10">إضافة فورية</button>
                 </form>
               </div>
-              <div className="space-y-4">
-                <h3 className="font-bold text-slate-700 flex items-center gap-2"><Users className="w-5 h-5 text-emerald-600" /> الحسابات المسجلة ({users.length})</h3>
-                <div className="border border-slate-100 rounded-2xl overflow-hidden">
+
+              <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-black text-slate-800 flex items-center gap-3 text-xl"><Users className="w-6 h-6 text-emerald-600" /> المستخدمين الحاليين ({users.length})</h3>
+                  <div className="text-[10px] font-black text-slate-400 bg-slate-100 px-3 py-1 rounded-full uppercase tracking-widest">مربوط بـ Neon DB</div>
+                </div>
+                <div className="border border-slate-100 rounded-3xl overflow-hidden overflow-x-auto shadow-sm">
                   <table className="w-full text-right">
-                    <thead className="bg-slate-100 text-slate-500 text-xs font-black">
-                      <tr><th className="px-6 py-4">المستخدم</th><th className="px-6 py-4">كلمة المرور</th><th className="px-6 py-4 text-center">حالة الجلسة</th><th className="px-6 py-4 text-center">العمليات</th></tr>
+                    <thead className="bg-slate-50 text-slate-400 text-[10px] font-black uppercase tracking-widest">
+                      <tr><th className="px-8 py-5">المستخدم</th><th className="px-8 py-5">كلمة المرور</th><th className="px-8 py-5 text-center">حالة الجلسة</th><th className="px-8 py-5 text-center">إجراء</th></tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-50">
+                    <tbody className="divide-y divide-slate-100">
                       {users.map((u) => (
-                        <tr key={u.id} className={`hover:bg-slate-50/80 transition-colors ${editingUserId === u.id ? 'bg-amber-50' : ''}`}>
-                          <td className="px-6 py-4 font-bold">
-                            {editingUserId === u.id ? <input type="text" className="border rounded-lg px-2 py-1 w-full" value={userEditValues?.username} onChange={(e) => setUserEditValues(prev => prev ? {...prev, username: e.target.value} : null)} /> : <div className="flex items-center gap-2">{u.username}{u.role === 'admin' && <ShieldCheck className="w-3 h-3 text-emerald-600" />}</div>}
-                          </td>
-                          <td className="px-6 py-4 font-mono text-sm text-slate-400">
-                            {editingUserId === u.id ? <input type="text" className="border rounded-lg px-2 py-1 w-full" value={userEditValues?.password} onChange={(e) => setUserEditValues(prev => prev ? {...prev, password: e.target.value} : null)} /> : u.password}
-                          </td>
-                          <td className="px-6 py-4 text-center">
-                            {u.activeSessionId ? <span className="inline-flex items-center gap-1.5 bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full text-[10px] font-black"><span className="w-1.5 h-1.5 bg-emerald-600 rounded-full animate-pulse"></span>نشط الآن</span> : <span className="text-[10px] text-slate-300 font-bold">غير متصل</span>}
-                          </td>
-                          <td className="px-6 py-4 text-center">
-                            <div className="flex items-center justify-center gap-2">
-                              {editingUserId === u.id ? <><button onClick={saveUserEdit} className="p-2 text-emerald-600 hover:bg-emerald-100 rounded-xl transition-all"><Check className="w-5 h-5" /></button><button onClick={() => setEditingUserId(null)} className="p-2 text-slate-400 hover:bg-slate-100 rounded-xl transition-all"><X className="w-5 h-5" /></button></> : <><button onClick={() => startUserEdit(u)} title="تعديل الحساب" className="p-2 text-blue-500 hover:bg-blue-50 rounded-xl transition-all"><Edit2 className="w-4 h-4" /></button><button onClick={() => handleDeleteUser(u.id)} title="حذف الحساب" className="p-2 text-rose-400 hover:bg-rose-50 rounded-xl transition-all"><Trash2 className="w-4 h-4" /></button></>}
+                        <tr key={u.id} className="hover:bg-slate-50/50 transition-colors group">
+                          <td className="px-8 py-5">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-8 h-8 rounded-xl flex items-center justify-center font-bold text-xs ${u.role === 'admin' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                                {u.username[0].toUpperCase()}
+                              </div>
+                              <span className="font-bold text-slate-700">{u.username}</span>
+                              {u.role === 'admin' && <Crown className="w-3.5 h-3.5 text-amber-500" />}
                             </div>
+                          </td>
+                          <td className="px-8 py-5 font-mono text-sm text-slate-400">{u.password}</td>
+                          <td className="px-8 py-5 text-center">
+                            {u.activeSessionId ? (
+                              <span className="inline-flex items-center gap-1.5 bg-emerald-100 text-emerald-700 px-3 py-1.5 rounded-full text-[10px] font-black border border-emerald-200">
+                                <span className="w-1.5 h-1.5 bg-emerald-600 rounded-full animate-ping"></span> متصل الآن
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-slate-300 font-bold bg-slate-100 px-3 py-1.5 rounded-full uppercase">غير متصل</span>
+                            )}
+                          </td>
+                          <td className="px-8 py-5 text-center">
+                            <button 
+                              onClick={() => {
+                                if(u.id === currentUserId) return alert("خطأ: لا يمكنك حذف حسابك الخاص أثناء تسجيل الدخول.");
+                                if(confirm(`هل أنت متأكد من حذف حساب ${u.username}؟ سيتم حذف كافة بياناته المالية أيضاً.`)) {
+                                  setUsers(prev => prev.filter(item => item.id !== u.id));
+                                }
+                              }} 
+                              className="p-3 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-2xl transition-all"
+                            >
+                              <Trash2 className="w-5 h-5" />
+                            </button>
                           </td>
                         </tr>
                       ))}
@@ -432,173 +441,269 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Confirmation Modals */}
-      {showRestoreConfirm && pendingRestoreData && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white w-full max-w-sm rounded-3xl shadow-2xl p-8 text-center border border-slate-200">
-            <History className="w-12 h-12 text-blue-600 mx-auto mb-4" />
-            <h2 className="text-xl font-bold mb-2">استعادة البيانات</h2>
-            <p className="text-slate-500 text-sm mb-6">سيتم استبدال بياناتك الحالية بـ {pendingRestoreData.count} حركة من نسخة {new Date(pendingRestoreData.date).toLocaleDateString('ar-EG')}.</p>
-            <div className="flex gap-3">
-              <button onClick={() => setShowRestoreConfirm(false)} className="flex-1 py-3 bg-slate-100 rounded-xl font-bold">إلغاء</button>
-              <button onClick={executeRestore} className="flex-1 py-3 bg-blue-600 text-white rounded-xl font-bold">تأكيد</button>
+      {/* Header Section */}
+      <header className="bg-white border-b border-slate-100 sticky top-0 z-50 no-print shadow-sm backdrop-blur-md bg-white/90">
+        <div className="container mx-auto px-6 h-20 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="bg-emerald-600 p-2.5 rounded-2xl shadow-lg shadow-emerald-600/20">
+              <Calculator className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <h1 className="text-xl font-black tracking-tight text-slate-800">محاسب الواتساب</h1>
+              <p className="text-[10px] font-black text-emerald-600 uppercase tracking-widest leading-none mt-1">Neon Cloud Integrated</p>
             </div>
           </div>
-        </div>
-      )}
-
-      {showClearConfirm && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white w-full max-w-sm rounded-3xl shadow-2xl p-8 text-center border border-slate-200">
-            <AlertTriangle className="w-12 h-12 text-rose-600 mx-auto mb-4" />
-            <h2 className="text-xl font-bold mb-2">تصفير السجل</h2>
-            <p className="text-slate-500 text-sm mb-6">هل أنت متأكد من مسح كافة حركاتك المالية الحالية؟</p>
-            <div className="flex gap-3">
-              <button onClick={() => setShowClearConfirm(false)} className="flex-1 py-3 bg-slate-100 rounded-xl font-bold">إلغاء</button>
-              <button onClick={() => { setTransactions([]); setShowClearConfirm(false); }} className="flex-1 py-3 bg-rose-600 text-white rounded-xl font-bold">مسح الكل</button>
+          <div className="flex items-center gap-3">
+            <div className="hidden md:flex items-center gap-2 px-4 py-2 bg-slate-50 rounded-2xl border border-slate-100">
+              <div className={`w-2 h-2 rounded-full ${cloudStatus === 'connected' || cloudStatus === 'synced' ? 'bg-emerald-500' : 'bg-slate-300'} ${syncing ? 'animate-pulse' : ''}`}></div>
+              <span className="text-xs font-black text-slate-400 uppercase tracking-widest">
+                {syncing ? 'مزامنة...' : cloudStatus === 'synced' ? 'تم الحفظ' : cloudStatus === 'connected' ? 'Neon متصل' : 'سحابي'}
+              </span>
             </div>
-          </div>
-        </div>
-      )}
-
-      <header className="bg-emerald-600 text-white shadow-lg sticky top-0 z-50 no-print">
-        <div className="container mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Calculator className="w-8 h-8" />
-            <h1 className="text-xl font-bold hidden sm:block tracking-tight">محاسب الواتساب الذكي</h1>
-          </div>
-          <div className="flex items-center gap-2 sm:gap-3">
-            {isAdmin && <button onClick={() => setShowAdminPanel(true)} className="bg-amber-500 hover:bg-amber-600 px-3 py-1.5 rounded-lg text-sm font-black flex items-center gap-1.5 transition-all shadow-md active:scale-95"><ShieldCheck className="w-4 h-4" />لوحة التحكم</button>}
-            <button onClick={handleDownloadExcel} className="bg-emerald-500/50 hover:bg-emerald-500 px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors"><Table className="w-4 h-4" /><span className="hidden lg:inline">إكسل</span></button>
-            <button onClick={handleDownloadPDF} className="bg-emerald-500/50 hover:bg-emerald-500 px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors"><FileDown className="w-4 h-4" /><span className="hidden lg:inline">PDF</span></button>
-            <div className="w-px h-6 bg-emerald-400/30 mx-1 hidden sm:block"></div>
-            <button onClick={handleLogout} className="text-emerald-100 hover:text-white flex items-center gap-1 text-sm font-medium transition-colors hover:bg-white/10 px-3 py-1.5 rounded-lg"><LogOut className="w-4 h-4" /><span className="hidden sm:inline">خروج</span></button>
+            <button 
+              onClick={handleCloudSync} 
+              disabled={syncing}
+              className={`p-2.5 rounded-2xl transition-all border ${syncing ? 'bg-slate-100 text-slate-400 border-slate-200' : 'bg-emerald-50 text-emerald-600 border-emerald-100 hover:bg-emerald-600 hover:text-white hover:shadow-lg hover:shadow-emerald-600/10'}`}
+              title="مزامنة مع Neon DB"
+            >
+              <CloudSync className={`w-5 h-5 ${syncing ? 'animate-spin' : ''}`} />
+            </button>
+            <div className="w-px h-8 bg-slate-100 mx-1"></div>
+            {isAdmin && (
+              <button 
+                onClick={() => setShowAdminPanel(true)} 
+                className="bg-amber-50 text-amber-600 hover:bg-amber-600 hover:text-white px-5 py-2.5 rounded-2xl text-xs font-black flex items-center gap-2 transition-all border border-amber-100 active:scale-95"
+              >
+                <ShieldCheck className="w-4 h-4" /> <span className="hidden lg:inline">لوحة التحكم</span>
+              </button>
+            )}
+            <button 
+              onClick={handleLogout} 
+              className="bg-slate-50 text-slate-400 hover:text-rose-500 hover:bg-rose-50 px-5 py-2.5 rounded-2xl text-xs font-black flex items-center gap-2 transition-all border border-slate-100 active:scale-95"
+            >
+              <LogOut className="w-4 h-4" /> <span className="hidden lg:inline">خروج</span>
+            </button>
           </div>
         </div>
       </header>
 
-      <main className="container mx-auto px-4 mt-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        {/* Sidebar */}
-        <div className="lg:col-span-4 space-y-6 no-print">
-          <div className="bg-emerald-700 rounded-2xl shadow-lg p-8 text-white text-center">
-            <p className="text-emerald-100 text-sm mb-1">الرصيد الإجمالي التقديري</p>
-            <div className="text-4xl font-bold flex items-center justify-center gap-2"><DollarSign className="w-9 h-9" />{totalUsdBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-            <div className="mt-3 inline-flex items-center gap-1.5 bg-emerald-800/50 px-3 py-1 rounded-full text-[10px] font-bold text-emerald-200 border border-emerald-600/50">
-              <ShieldCheck className="w-3 h-3" /> جلسة مشفرة: {currentUser?.username}
+      <main className="container mx-auto px-6 mt-10 grid grid-cols-1 lg:grid-cols-12 gap-10">
+        {/* Left Sidebar */}
+        <aside className="lg:col-span-4 space-y-8 no-print">
+          {/* Main Balance Card */}
+          <div className="bg-gradient-to-br from-emerald-600 to-emerald-800 rounded-[3rem] shadow-2xl shadow-emerald-600/20 p-10 text-white relative overflow-hidden group">
+            <div className="absolute -right-10 -bottom-10 opacity-10 group-hover:rotate-12 transition-transform duration-700">
+              <TrendingUp className="w-64 h-64" />
+            </div>
+            <p className="text-emerald-100 text-sm font-bold flex items-center gap-2 mb-2">
+              <PieChart className="w-4 h-4" /> صافي الرصيد التقديري
+            </p>
+            <div className="text-5xl font-black flex items-center gap-3 tracking-tighter">
+              <DollarSign className="w-10 h-10 text-emerald-200" />
+              {totalUsdBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </div>
+            <div className="mt-8 pt-8 border-t border-white/10 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-white/10 rounded-2xl flex items-center justify-center backdrop-blur-md">
+                  <User className="w-5 h-5 text-emerald-200" />
+                </div>
+                <div>
+                  <p className="text-[10px] text-emerald-200 uppercase font-black tracking-widest leading-none mb-1">المستخدم النشط</p>
+                  <p className="font-black text-white">{currentUser?.username}</p>
+                </div>
+              </div>
+              {cloudStatus === 'connected' && <div className="text-[8px] font-black bg-white/10 px-2 py-1 rounded-full uppercase tracking-widest text-emerald-200">Sync Active</div>}
             </div>
           </div>
 
-          {/* Designer attribution card */}
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-            <div className="bg-slate-50 p-4 border-b border-slate-100 flex items-center gap-3">
-               <div className="bg-amber-100 p-2 rounded-lg"><Crown className="w-5 h-5 text-amber-600" /></div>
-               <div><p className="text-xs font-bold text-slate-400">تصميم وتطوير</p><h3 className="text-sm font-black text-slate-700">الأستاذ عبد الرزاق الموسى</h3></div>
+          {/* Designer Branding Card */}
+          <div className="bg-white rounded-[2.5rem] shadow-sm border border-slate-100 overflow-hidden group hover:shadow-xl transition-all duration-500">
+            <div className="bg-slate-50 p-6 border-b border-slate-50 flex items-center gap-4">
+               <div className="bg-amber-100 p-3 rounded-2xl group-hover:rotate-12 transition-transform duration-500"><Crown className="w-6 h-6 text-amber-600" /></div>
+               <div>
+                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">تطوير وتصميم</p>
+                 <h3 className="text-lg font-black text-slate-700">الأستاذ عبد الرزاق الموسى</h3>
+               </div>
             </div>
-            <div className="p-5">
-               <a href="https://wa.me/963992262993" target="_blank" rel="noopener noreferrer" className="flex items-center justify-between p-3 bg-emerald-50 rounded-xl border border-emerald-100 group hover:bg-emerald-600 transition-all duration-300">
-                  <div className="flex items-center gap-3">
-                    <MessageCircle className="w-5 h-5 text-emerald-600 group-hover:text-white" />
-                    <span className="text-sm font-bold text-emerald-700 group-hover:text-white">تواصل واتساب</span>
+            <div className="p-6">
+               <a 
+                href="https://wa.me/963992262993" 
+                target="_blank" 
+                rel="noopener noreferrer" 
+                className="flex items-center justify-between p-5 bg-emerald-50 rounded-[1.5rem] border border-emerald-100 group/btn hover:bg-emerald-600 transition-all duration-500"
+               >
+                  <div className="flex items-center gap-4">
+                    <div className="bg-white p-2 rounded-xl group-hover/btn:bg-emerald-500 transition-colors">
+                      <MessageCircle className="w-6 h-6 text-emerald-600 group-hover/btn:text-white" />
+                    </div>
+                    <span className="text-sm font-black text-emerald-700 group-hover/btn:text-white">تواصل مباشر واتساب</span>
                   </div>
-                  <ExternalLink className="w-4 h-4 text-emerald-300 group-hover:text-white" />
+                  <ExternalLink className="w-4 h-4 text-emerald-300 group-hover/btn:text-white" />
                </a>
-               <p className="text-[10px] text-center text-slate-400 mt-4 font-bold leading-relaxed">للدعم الفني وتخصيص الأنظمة المحاسبية<br/>+963 992 262 993</p>
             </div>
           </div>
 
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-            <h2 className="font-bold text-lg flex items-center gap-2 mb-6 text-slate-700"><Database className="w-5 h-5 text-emerald-600" />إدارة البيانات</h2>
-            <div className="grid grid-cols-2 gap-3">
-              <button onClick={handleExportBackup} className="flex flex-col items-center gap-2 p-4 bg-slate-50 border border-slate-100 rounded-2xl hover:bg-emerald-50 transition-all group"><Download className="w-6 h-6 text-slate-400 group-hover:text-emerald-600 transition-colors" /><span className="text-xs font-bold text-slate-600">تصدير</span></button>
-              <button onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center gap-2 p-4 bg-slate-50 border border-slate-100 rounded-2xl hover:bg-blue-50 transition-all group"><Upload className="w-6 h-6 text-slate-400 group-hover:text-blue-600 transition-colors" /><span className="text-xs font-bold text-slate-600">استيراد</span></button>
+          {/* Exchange Rates Card */}
+          <div className="bg-white rounded-[2.5rem] shadow-sm border border-slate-100 p-8">
+            <div className="flex items-center justify-between mb-8">
+              <h2 className="font-black text-xl text-slate-700 flex items-center gap-3">
+                <Settings className="w-6 h-6 text-emerald-600" /> أسعار الصرف
+              </h2>
+              <button 
+                onClick={() => { const c = prompt('أدخل رمز العملة الجديدة (مثال: EUR):'); if(c) setExchangeRates(prev => ({...prev, [c.toUpperCase()]: 1})); }} 
+                className="p-2 hover:bg-slate-50 rounded-xl transition-colors text-emerald-600 border border-emerald-50"
+              >
+                <Plus className="w-5 h-5" />
+              </button>
             </div>
-            <button onClick={() => setShowClearConfirm(true)} className="w-full mt-4 py-2 text-rose-500 text-xs font-bold hover:bg-rose-50 rounded-xl transition-colors flex items-center justify-center gap-2 border border-rose-100"><RefreshCcw className="w-3 h-3" />مسح كافة الحركات</button>
-          </div>
-
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-            <div className="flex items-center justify-between mb-6"><h2 className="font-bold text-lg flex items-center gap-2 text-slate-700"><Settings className="w-5 h-5 text-emerald-600" />أسعار الصرف</h2><button onClick={addNewCurrency} className="p-1.5 hover:bg-slate-100 rounded-full transition-colors"><Plus className="w-5 h-5 text-emerald-600" /></button></div>
-            <div className="space-y-4">
+            <div className="space-y-5">
               {Object.entries(exchangeRates).map(([currency, rate]) => (
-                <div key={currency} className="flex items-center gap-3"><span className="w-16 text-xs font-black text-slate-400 uppercase tracking-widest">{currency}</span><input type="number" value={rate} onChange={(e) => handleRateChange(currency, e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm font-bold focus:ring-2 focus:ring-emerald-500 outline-none transition-all" /></div>
+                <div key={currency} className="flex items-center gap-4 group">
+                  <div className="w-16 h-12 bg-slate-50 border border-slate-100 rounded-2xl flex items-center justify-center text-xs font-black text-slate-400 uppercase tracking-widest group-hover:border-emerald-200 group-hover:bg-emerald-50 transition-all">
+                    {currency}
+                  </div>
+                  <div className="relative flex-1">
+                    <input 
+                      type="number" 
+                      value={rate} 
+                      onChange={(e) => { 
+                        const r = parseFloat(e.target.value); 
+                        if(!isNaN(r)) setExchangeRates(prev => ({...prev, [currency]: r})); 
+                      }} 
+                      className="w-full bg-slate-50 border border-slate-100 rounded-2xl px-5 py-3 text-sm font-black focus:ring-4 focus:ring-emerald-500/10 focus:border-emerald-500 outline-none transition-all group-hover:bg-white" 
+                    />
+                    <div className="absolute left-4 top-1/2 -translate-y-1/2 text-[10px] font-black text-slate-300">/ USD</div>
+                  </div>
+                </div>
               ))}
             </div>
           </div>
-        </div>
 
-        {/* Content Area */}
-        <div className="lg:col-span-8 space-y-8" ref={reportRef}>
-          <div className="hidden block-for-pdf bg-white rounded-3xl p-10 border-4 border-emerald-600 mb-10 shadow-sm">
-            <div className="flex justify-between items-start">
-              <div className="flex items-center gap-4">
-                <div className="bg-emerald-600 p-4 rounded-2xl text-white"><Calculator className="w-10 h-10" /></div>
-                <div><h1 className="text-4xl font-black text-emerald-700 leading-tight">محاسب الواتساب الذكي</h1><p className="text-slate-500 font-bold text-lg mt-1">تصميم الأستاذ: عبد الرزاق الموسى</p></div>
-              </div>
-              <div className="text-left rtl:text-right border-r-2 border-emerald-100 pr-6 mr-6"><div className="flex items-center gap-2 text-slate-400 mb-1"><Clock className="w-4 h-4" /><span className="text-sm font-bold">تاريخ الإصدار</span></div><p className="text-emerald-600 font-black text-xl">{new Date().toLocaleDateString('ar-EG', { dateStyle: 'long' })}</p></div>
-            </div>
-            <div className="mt-12 bg-emerald-50 border-2 border-emerald-100 p-8 rounded-[2rem] flex items-center justify-between">
-              <div><p className="text-emerald-800 text-lg font-black mb-1">إجمالي الرصيد الصافي (USD)</p></div>
-              <div className="bg-emerald-600 px-8 py-5 rounded-2xl text-white text-center shadow-lg"><div className="text-4xl font-black flex items-center justify-center gap-2"><span className="text-2xl font-bold opacity-80">$</span>{totalUsdBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div></div>
-            </div>
+          {/* Data Cleanup (Small) */}
+          <div className="px-4">
+             <button 
+              onClick={() => { if(confirm("هل أنت متأكد من مسح كافة بيانات السجل؟ لا يمكن التراجع.")) { setTransactions([]); handleCloudSync(); }}} 
+              className="w-full py-4 text-slate-300 hover:text-rose-500 text-[10px] font-black uppercase tracking-[0.3em] flex items-center justify-center gap-2 transition-all border-2 border-dashed border-slate-100 rounded-[2rem] hover:border-rose-100 hover:bg-rose-50/30"
+             >
+               <RefreshCcw className="w-3.5 h-3.5" /> تصفير قاعدة البيانات المحلية
+             </button>
           </div>
+        </aside>
 
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 no-print">
-            <label className="block mb-4 font-bold text-slate-700 flex items-center gap-2 text-lg"><MessageSquare className="w-6 h-6 text-emerald-600" />تحليل نص جديد</label>
-            <textarea className="w-full h-44 bg-slate-50 border border-slate-200 rounded-2xl p-5 text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none transition-all resize-none text-lg leading-relaxed shadow-inner" placeholder="انسخ الحسابات من واتساب هنا..." value={inputText} onChange={(e) => setInputText(e.target.value)} />
-            {error && <div className="mt-3 p-3 bg-rose-50 text-rose-600 text-sm font-medium border border-rose-100 rounded-lg">⚠️ {error}</div>}
-            <button onClick={handleProcessText} disabled={loading || !inputText.trim()} className={`mt-5 w-full py-4 rounded-xl font-bold text-white transition-all flex items-center justify-center gap-3 text-lg shadow-md ${loading ? 'bg-slate-400' : 'bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98]'}`}>
-              {loading ? "جاري التحليل..." : "إضافة الحسابات لدفتر البيانات"}
+        {/* Right Main Content */}
+        <section className="lg:col-span-8 space-y-10" ref={reportRef}>
+          {/* Text Input Section */}
+          <div className="bg-white rounded-[3rem] shadow-sm border border-slate-100 p-8 no-print relative group">
+            <div className="absolute top-8 left-8">
+               <MessageSquare className="w-12 h-12 text-slate-50 group-hover:text-emerald-50 transition-colors" />
+            </div>
+            <label className="block mb-6 font-black text-slate-700 flex items-center gap-3 text-2xl relative z-10">
+              <div className="w-10 h-10 bg-emerald-100 rounded-2xl flex items-center justify-center"><Plus className="w-6 h-6 text-emerald-600" /></div> 
+              إضافة حسابات الواتساب
+            </label>
+            <textarea 
+              className="w-full h-44 bg-slate-50 border border-slate-100 rounded-[2rem] p-8 text-slate-800 focus:ring-8 focus:ring-emerald-500/5 focus:border-emerald-500/30 outline-none transition-all resize-none text-xl leading-relaxed shadow-inner placeholder:text-slate-300 relative z-10" 
+              placeholder="مثال: أرسل لي أحمد 500 ليرة تركي حق غدا..." 
+              value={inputText} 
+              onChange={(e) => setInputText(e.target.value)} 
+            />
+            {error && <div className="mt-4 p-4 bg-rose-50 text-rose-600 text-sm font-bold border border-rose-100 rounded-2xl animate-bounce">⚠️ {error}</div>}
+            <button 
+              onClick={handleProcessText} 
+              disabled={loading || !inputText.trim()} 
+              className={`mt-6 w-full py-5 rounded-[2rem] font-black text-white transition-all flex items-center justify-center gap-4 text-xl shadow-xl ${loading ? 'bg-slate-300 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20 active:scale-95'}`}
+            >
+              {loading ? (
+                <>
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                  جاري التحليل الذكي...
+                </>
+              ) : (
+                <>
+                  تحليل وإضافة للدفتر
+                  <ChevronRight className="w-6 h-6" />
+                </>
+              )}
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* Quick Stats Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {summaries.map((summary) => (
-              <div key={summary.currency} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 break-inside-avoid shadow-inner-white">
-                <div className="flex justify-between items-center mb-5"><span className="bg-slate-100 text-slate-700 px-3 py-1 rounded-lg font-black text-sm uppercase tracking-widest">{summary.currency}</span><span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded border border-emerald-100">≈ {summary.usdValue.toFixed(2)} $</span></div>
-                <div className="space-y-3">
-                  <div className="flex justify-between text-sm"><span className="text-slate-400 font-bold">إجمالي الوارد</span><span className="text-emerald-600 font-black">+{summary.totalIncoming.toLocaleString()}</span></div>
-                  <div className="flex justify-between text-sm"><span className="text-slate-400 font-bold">إجمالي الصادر</span><span className="text-rose-600 font-black">-{summary.totalOutgoing.toLocaleString()}</span></div>
-                  <div className="pt-3 border-t border-slate-100 flex justify-between items-center"><span className="font-bold text-slate-700">الصافي</span><span className={`text-xl font-black ${summary.balance >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{summary.balance.toLocaleString()}</span></div>
+              <div key={summary.currency} className="bg-white rounded-[2.5rem] shadow-sm border border-slate-100 p-8 hover:shadow-lg transition-all duration-500 group">
+                <div className="flex justify-between items-center mb-6">
+                  <span className="bg-slate-100 text-slate-700 px-4 py-1.5 rounded-xl font-black text-sm uppercase tracking-widest border border-slate-200/50">{summary.currency}</span>
+                  <span className="text-xs font-black text-emerald-600 bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-100">≈ {summary.usdValue.toFixed(2)} $</span>
+                </div>
+                <div className="space-y-3 text-sm">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400 font-bold">له (وارد)</span>
+                    <span className="text-emerald-600 font-black tracking-tight text-lg">+{summary.totalIncoming.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400 font-bold">عليه (صادر)</span>
+                    <span className="text-rose-600 font-black tracking-tight text-lg">-{summary.totalOutgoing.toLocaleString()}</span>
+                  </div>
+                  <div className="pt-4 mt-2 border-t border-slate-50 flex justify-between items-end">
+                    <span className="font-black text-slate-400 text-[10px] uppercase tracking-widest pb-1">الصافي</span>
+                    <span className={`text-3xl font-black tracking-tighter ${summary.balance >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                      {summary.balance.toLocaleString()}
+                    </span>
+                  </div>
                 </div>
               </div>
             ))}
           </div>
 
+          {/* Transactions List */}
           {transactions.length > 0 ? (
-            <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden break-before-page">
-              <div className="p-6 border-b border-slate-100 bg-slate-50/80 flex justify-between items-center">
-                <h2 className="font-black text-slate-700 text-xl flex items-center gap-3"><FileText className="w-6 h-6 text-emerald-600" />سجل الحسابات الشخصي</h2>
-                <span className="text-xs font-bold text-slate-400 bg-slate-100 px-3 py-1 rounded-full">{currentUser?.username}</span>
+            <div className="bg-white rounded-[3rem] shadow-sm border border-slate-100 overflow-hidden break-before-page shadow-inner-white">
+              <div className="p-10 border-b border-slate-50 bg-slate-50/50 flex flex-col md:flex-row md:justify-between md:items-center gap-6">
+                <div>
+                  <h2 className="font-black text-slate-800 text-2xl flex items-center gap-4">
+                    <FileText className="w-8 h-8 text-emerald-600" /> كشف الحساب المفصل
+                  </h2>
+                  <p className="text-xs font-bold text-slate-400 mt-1 uppercase tracking-widest">Neon Cloud Ledger: {currentUser?.username}</p>
+                </div>
+                <div className="flex gap-4 no-print">
+                  <button onClick={handleDownloadExcel} title="تحميل إكسل" className="bg-white p-4 rounded-2xl text-emerald-600 border border-emerald-100 hover:bg-emerald-600 hover:text-white transition-all shadow-sm active:scale-95"><Table className="w-6 h-6" /></button>
+                  <button onClick={handleDownloadPDF} title="تحميل PDF" className="bg-white p-4 rounded-2xl text-rose-500 border border-rose-100 hover:bg-rose-500 hover:text-white transition-all shadow-sm active:scale-95"><FileDown className="w-6 h-6" /></button>
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-right border-collapse">
                   <thead>
-                    <tr className="text-slate-400 text-xs uppercase font-black border-b border-slate-100 bg-slate-50/30">
-                      <th className="px-6 py-5">النوع</th><th className="px-6 py-5">المبلغ</th><th className="px-6 py-5">العملة</th><th className="px-6 py-5">الوصف والبيان</th><th className="px-6 py-5 text-center no-print">إجراءات</th>
+                    <tr className="text-slate-400 text-[10px] font-black border-b border-slate-100 bg-slate-50/20 uppercase tracking-[0.2em]">
+                      <th className="px-10 py-6">نوع العملية</th>
+                      <th className="px-10 py-6">المبلغ</th>
+                      <th className="px-10 py-6">العملة</th>
+                      <th className="px-10 py-6">البيان والتفاصيل</th>
+                      <th className="px-10 py-6 text-center no-print">إجراء</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {transactions.map((t) => (
-                      <tr key={t.id} className={`hover:bg-slate-50 transition-colors ${editingId === t.id ? 'bg-emerald-50/30' : ''} break-inside-avoid`}>
-                        <td className="px-6 py-5">
-                          {editingId === t.id ? (
-                            <select value={editValues?.type} onChange={(e) => setEditValues(prev => prev ? {...prev, type: e.target.value as TransactionType} : null)} className="bg-white border border-slate-200 rounded-lg p-2 text-sm font-bold"><option value={TransactionType.INCOMING}>وارد / له</option><option value={TransactionType.OUTGOING}>صادر / عليه</option></select>
-                          ) : (
-                            <div className={`flex items-center gap-2 ${t.type === TransactionType.INCOMING ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}`}>{t.type === TransactionType.INCOMING ? <ArrowDownCircle className="w-4 h-4" /> : <ArrowUpCircle className="w-4 h-4" />}<span className="text-sm">{t.type === TransactionType.INCOMING ? 'وارد' : 'صادر'}</span></div>
-                          )}
-                        </td>
-                        <td className="px-6 py-5 font-black text-slate-700 whitespace-nowrap text-lg">
-                          {editingId === t.id ? <input type="number" value={editValues?.amount} onChange={(e) => setEditValues(prev => prev ? {...prev, amount: parseFloat(e.target.value) || 0} : null)} className="w-28 border-2 border-slate-200 rounded-xl px-3 py-1.5 text-sm font-bold focus:ring-2 focus:ring-emerald-500 outline-none" /> : t.amount.toLocaleString()}
-                        </td>
-                        <td className="px-6 py-5 uppercase font-black text-slate-400 text-xs tracking-widest">
-                          {editingId === t.id ? <select value={editValues?.currency} onChange={(e) => setEditValues(prev => prev ? {...prev, currency: e.target.value} : null)} className="border-2 border-slate-200 rounded-xl p-1.5 font-bold">{Object.keys(exchangeRates).map(curr => <option key={curr} value={curr}>{curr}</option>)}</select> : t.currency}
-                        </td>
-                        <td className="px-6 py-5 text-slate-600 text-sm font-medium leading-relaxed">
-                          {editingId === t.id ? <input type="text" value={editValues?.description} onChange={(e) => setEditValues(prev => prev ? {...prev, description: e.target.value} : null)} className="w-full border-2 border-slate-200 rounded-xl px-3 py-1.5 text-sm focus:ring-2 focus:ring-emerald-500 outline-none" /> : t.description}
-                        </td>
-                        <td className="px-6 py-5 text-center no-print">
-                          <div className="flex items-center justify-center gap-1">
-                            {editingId === t.id ? <><button onClick={() => { if(editValues) setTransactions(prev => prev.map(t => t.id === editValues.id ? editValues : t)); setEditingId(null); }} className="p-2 text-emerald-600 hover:bg-emerald-100 rounded-xl transition-all"><Check className="w-6 h-6" /></button><button onClick={() => setEditingId(null)} className="p-2 text-slate-400 hover:bg-slate-100 rounded-xl transition-all"><X className="w-6 h-6" /></button></> : <><button onClick={() => { setEditingId(t.id); setEditValues({...t}); }} className="p-2 text-slate-300 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-all"><Edit2 className="w-5 h-5" /></button><button onClick={() => setTransactions(prev => prev.filter(item => item.id !== t.id))} className="p-2 text-slate-200 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-all"><Trash2 className="w-6 h-6" /></button></>}
+                      <tr key={t.id} className="hover:bg-slate-50/50 transition-colors group">
+                        <td className="px-10 py-7">
+                          <div className={`flex items-center gap-3 font-black text-sm ${t.type === TransactionType.INCOMING ? 'text-emerald-600' : 'text-rose-600'}`}>
+                            {t.type === TransactionType.INCOMING ? <ArrowDownCircle className="w-5 h-5" /> : <ArrowUpCircle className="w-5 h-5" />}
+                            {t.type === TransactionType.INCOMING ? 'له (وارد)' : 'عليه (صادر)'}
                           </div>
+                        </td>
+                        <td className="px-10 py-7 font-black text-slate-800 text-xl tracking-tighter">{t.amount.toLocaleString()}</td>
+                        <td className="px-10 py-7">
+                          <span className="text-[10px] font-black text-slate-400 uppercase bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200/50 tracking-widest">
+                            {t.currency}
+                          </span>
+                        </td>
+                        <td className="px-10 py-7 text-slate-600 font-bold text-sm leading-relaxed max-w-xs">{t.description}</td>
+                        <td className="px-10 py-7 text-center no-print">
+                          <button 
+                            onClick={() => { setTransactions(prev => prev.filter(item => item.id !== t.id)); handleCloudSync(); }} 
+                            className="p-3 text-slate-200 hover:text-rose-500 hover:bg-rose-50 rounded-2xl transition-all"
+                          >
+                            <Trash2 className="w-5 h-5" />
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -607,35 +712,34 @@ const App: React.FC = () => {
               </div>
             </div>
           ) : !loading && (
-            <div className="text-center py-24 bg-white rounded-[2.5rem] border-2 border-dashed border-slate-200 no-print">
-              <Calculator className="w-16 h-16 text-slate-200 mx-auto mb-6" />
-              <h3 className="text-slate-500 font-bold text-2xl mb-2">دفتر الحسابات فارغ</h3>
-              <p className="text-slate-400 max-w-xs mx-auto text-sm">أهلاً بك يا {currentUser?.username}. قم بإضافة أولى حساباتك الآن.</p>
+            <div className="text-center py-28 bg-white rounded-[4rem] border-4 border-dashed border-slate-50 no-print">
+               <div className="bg-slate-50 w-24 h-24 rounded-full flex items-center justify-center mx-auto mb-8">
+                 <Calculator className="w-10 h-10 text-slate-200" />
+               </div>
+               <h3 className="text-slate-800 font-black text-3xl mb-3">السجل فارغ تماماً</h3>
+               <p className="text-slate-400 font-medium max-w-sm mx-auto">أهلاً بك يا {currentUser?.username}. ابدأ بنسخ الحسابات من واتساب ولصقها في الحقل أعلاه وسأقوم بترتيبها لك فوراً.</p>
+               <div className="mt-8 flex justify-center gap-4">
+                 <div className="px-4 py-2 bg-emerald-50 text-emerald-600 text-[10px] font-black rounded-full uppercase tracking-widest">Smart AI Analytics</div>
+                 <div className="px-4 py-2 bg-blue-50 text-blue-600 text-[10px] font-black rounded-full uppercase tracking-widest">Neon Cloud Sync</div>
+               </div>
             </div>
           )}
-        </div>
+        </section>
       </main>
       
-      <footer className="container mx-auto px-4 mt-12 text-center border-t border-slate-200 pt-8 pb-4 no-print">
-        <div className="flex flex-col items-center gap-2">
-           <div className="flex items-center gap-2 text-slate-400 text-xs font-bold uppercase tracking-widest">
-              <span>تصميم الأستاذ: عبد الرزاق الموسى</span>
-              <span className="w-1 h-1 bg-slate-300 rounded-full"></span>
-              <a href="https://wa.me/963992262993" className="text-emerald-600 hover:underline">واتساب: +963992262993</a>
+      {/* Footer Branding */}
+      <footer className="container mx-auto px-6 mt-20 text-center border-t border-slate-100 pt-12 pb-8 no-print">
+        <div className="flex flex-col items-center gap-6">
+           <div className="flex items-center gap-4 text-slate-300 text-[10px] font-black uppercase tracking-[0.3em]">
+              <span className="hover:text-slate-600 transition-colors">الأستاذ: عبد الرزاق الموسى</span>
+              <span className="w-1.5 h-1.5 bg-slate-200 rounded-full"></span>
+              <a href="https://wa.me/963992262993" className="text-emerald-600 hover:text-emerald-700 transition-colors">تواصل واتساب: +963992262993</a>
            </div>
-           <p className="text-[10px] text-slate-300">نظام المحاسب الذكي - حماية الجلسة نشطة - جميع الحقوق محفوظة 2024</p>
+           <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100 grayscale hover:grayscale-0 transition-all duration-700">
+             <p className="text-[8px] text-slate-400 font-black uppercase tracking-widest">نظام المحاسب الذكي - متكامل مع Neon DB & Vercel Services - إصدار 2024.1</p>
+           </div>
         </div>
       </footer>
-
-      <style>{`
-        .block-for-pdf { display: none; }
-        .shadow-inner-white { box-shadow: inset 0 2px 4px 0 rgba(255, 255, 255, 0.05); }
-        .html2pdf__container .block-for-pdf { display: block !important; }
-        .html2pdf__container main { margin-top: 0 !important; }
-        .html2pdf__container table th { background-color: #f1f5f9 !important; color: #64748b !important; }
-        .html2pdf__container .bg-white { border: 1px solid #e2e8f0 !important; }
-        @media print { .block-for-pdf { display: block !important; } }
-      `}</style>
     </div>
   );
 };

@@ -1,7 +1,8 @@
 
 export enum TransactionType {
   INCOMING = 'INCOMING',
-  OUTGOING = 'OUTGOING'
+  OUTGOING = 'OUTGOING',
+  UNKNOWN = 'UNKNOWN'
 }
 
 export interface Transaction {

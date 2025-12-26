@@ -4,36 +4,55 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>محاسب الواتساب الذكي</title>
+    <title>المحاسب الذكي - الأستاذ عبد الرزاق الموسى</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;800;900&display=swap" rel="stylesheet">
     <style>
+      :root {
+        --primary: #064e3b;
+        --secondary: #1e1b4b;
+        --accent: #10b981;
+      }
       body {
         font-family: 'Tajawal', sans-serif;
-        background-color: #f8fafc;
+        background-color: #f0f2f5;
+        overflow-x: hidden;
       }
-      
-      /* Hide elements with no-print class during print/PDF generation */
       @media print {
         .no-print {
           display: none !important;
         }
-        body {
-          background-color: white;
-        }
       }
-
-      /* Custom utility for elements that should only appear in PDF */
-      .block-for-pdf {
-        display: none;
+      /* Animations */
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
       }
-      
-      /* html2pdf specific classes helper */
-      .html2canvas-container {
-        width: 100% !important;
-        height: 100% !important;
+      .animate-fade-in {
+        animation: fadeIn 0.5s ease-out forwards;
+      }
+      .glass-card {
+        background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.3);
+      }
+      .shadow-luxury {
+        box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.05), 0 20px 25px -5px rgba(0, 0, 0, 0.02);
+      }
+      .gradient-border {
+        position: relative;
+      }
+      .gradient-border::after {
+        content: '';
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 4px;
+        background: linear-gradient(to left, var(--accent), var(--secondary));
       }
     </style>
   <script type="importmap">

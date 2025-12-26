@@ -2,14 +2,11 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Transaction, TransactionType } from "./types";
 
-// Always use the process.env.API_KEY directly as per guidelines
+// Always use const ai = new GoogleGenAI({apiKey: process.env.API_KEY});
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 export const parseFinancialText = async (text: string): Promise<Transaction[]> => {
-  if (!process.env.API_KEY) {
-    throw new Error("API Key is missing. Please ensure it is set.");
-  }
-
+  // Use generateContent with both model name and prompt
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: `تحليل النص المالي التالي المستخرج من محادثة واتساب واستخراج الحسابات بوضوح:
@@ -20,10 +17,14 @@ export const parseFinancialText = async (text: string): Promise<Transaction[]> =
       - حدد العملة (مثل: USD للدوﻻر، TRY لليرة التركية، SYP لليرة السورية).
       - إذا ذكر المستخدم "ليرة" فقط في سياق سوري، فاستخدم SYP. إذا كان في سياق تركي، فاستخدم TRY.
       - حدد المبلغ كرقم.
-      - حدد النوع: INCOMING (وارد/له/أرسل لي/جاني) أو OUTGOING (صادر/عليه/صرفت/دفعت).
+      - حدد النوع: 
+        - INCOMING (وارد/له/أرسل لي/جاني)
+        - OUTGOING (صادر/عليه/صرفت/دفعت)
+        - UNKNOWN (إذا كان النص مبهماً ولا يوضح ما إذا كان المبلغ له أم عليه).
       - أضف وصفاً مختصراً للمعاملة.
       - إذا ذكر النص "لي" أو "وارد" فهي INCOMING.
       - إذا ذكر النص "علي" أو "صادر" أو "مصاريف" فهي OUTGOING.
+      - في حال عدم وضوح الاتجاه، استخدم UNKNOWN ليتمكن المستخدم من تصحيحها يدوياً.
       - ارجع النتيجة كقائمة JSON حصراً.`,
       responseMimeType: "application/json",
       responseSchema: {
@@ -33,7 +34,7 @@ export const parseFinancialText = async (text: string): Promise<Transaction[]> =
           properties: {
             currency: { type: Type.STRING, description: "رمز العملة الموحد (USD, TRY, SYP)" },
             amount: { type: Type.NUMBER, description: "القيمة العددية للمبلغ" },
-            type: { type: Type.STRING, enum: ["INCOMING", "OUTGOING"], description: "نوع المعاملة" },
+            type: { type: Type.STRING, description: "نوع المعاملة" },
             description: { type: Type.STRING, description: "وصف المعاملة" }
           },
           required: ["currency", "amount", "type", "description"]
@@ -42,6 +43,7 @@ export const parseFinancialText = async (text: string): Promise<Transaction[]> =
     }
   });
 
+  // Access .text property directly (not as a function)
   const parsed = JSON.parse(response.text.trim());
   return parsed.map((item: any, index: number) => ({
     ...item,

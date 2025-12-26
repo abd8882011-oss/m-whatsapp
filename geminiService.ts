@@ -2,62 +2,83 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Transaction, TransactionType } from "./types";
 
-export const parseFinancialText = async (text: string): Promise<Transaction[]> => {
-  // CRITICAL: Create a new GoogleGenAI instance right before making an API call 
-  // to ensure it always uses the most up-to-date API key and handles environment timing issues on mobile.
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: `تحليل النص المالي التالي المستخرج من محادثة واتساب واستخراج الحسابات بوضوح:
+export const parseFinancialText = async (text: string): Promise<Transaction[]> => {
+  const apiKey = process.env.API_KEY;
+  
+  if (!apiKey) {
+    throw new Error("مفتاح الـ API غير متوفر. يرجى إعداد المتغيرات البيئية بشكل صحيح.");
+  }
+
+  let lastError: any;
+  const maxRetries = 2; // إجمالي المحاولات = 3
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      // إنشاء نسخة جديدة في كل محاولة لضمان نظافة الطلب
+      const ai = new GoogleGenAI({ apiKey });
       
-      النص: "${text}"`,
-      config: {
-        systemInstruction: `أنت محاسب خبير. مهمتك هي استخراج المعاملات المالية من نصوص واتساب غير المنظمة.
-        - حدد العملة (مثل: USD للدوﻻر، TRY لليرة التركية، SYP لليرة السورية).
-        - إذا ذكر المستخدم "ليرة" فقط في سياق سوري، فاستخدم SYP. إذا كان في سياق تركي، فاستخدم TRY.
-        - حدد المبلغ كرقم.
-        - حدد النوع: 
-          - INCOMING (وارد/له/أرسل لي/جاني)
-          - OUTGOING (صادر/عليه/صرفت/دفعت)
-          - UNKNOWN (إذا كان النص مبهماً ولا يوضح ما إذا كان المبلغ له أم عليه).
-        - أضف وصفاً مختصراً للمعاملة.
-        - إذا ذكر النص "لي" أو "وارد" فهي INCOMING.
-        - إذا ذكر النص "علي" أو "صادر" أو "مصاريف" فهي OUTGOING.
-        - في حال عدم وضوح الاتجاه، استخدم UNKNOWN ليتمكن المستخدم من تصحيحها يدوياً.
-        - ارجع النتيجة كقائمة JSON حصراً.`,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              currency: { type: Type.STRING, description: "رمز العملة الموحد (USD, TRY, SYP)" },
-              amount: { type: Type.NUMBER, description: "القيمة العددية للمبلغ" },
-              type: { type: Type.STRING, description: "نوع المعاملة" },
-              description: { type: Type.STRING, description: "وصف المعاملة" }
-            },
-            required: ["currency", "amount", "type", "description"]
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `تحليل النص المالي التالي المستخرج من محادثة واتساب واستخراج الحسابات بوضوح:
+        
+        النص: "${text}"`,
+        config: {
+          systemInstruction: `أنت محاسب خبير. مهمتك هي استخراج المعاملات المالية من نصوص واتساب غير المنظمة.
+          - حدد العملة (مثل: USD للدوﻻر، TRY لليرة التركية، SYP لليرة السورية).
+          - حدد المبلغ كرقم.
+          - النوع: INCOMING (له)، OUTGOING (عليه)، UNKNOWN.
+          - ارجع النتيجة كقائمة JSON حصراً.`,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                currency: { type: Type.STRING },
+                amount: { type: Type.NUMBER },
+                type: { type: Type.STRING },
+                description: { type: Type.STRING }
+              },
+              required: ["currency", "amount", "type", "description"]
+            }
           }
         }
+      });
+
+      if (!response || !response.text) {
+        throw new Error("استجابة فارغة من الخادم.");
       }
-    });
 
-    if (!response || !response.text) {
-      throw new Error("لم يتم استلام استجابة من الخادم. يرجى التحقق من الاتصال.");
-    }
+      const parsed = JSON.parse(response.text.trim());
+      return parsed.map((item: any, index: number) => ({
+        ...item,
+        id: `${Date.now()}-${index}`
+      }));
 
-    const parsed = JSON.parse(response.text.trim());
-    return parsed.map((item: any, index: number) => ({
-      ...item,
-      id: `${Date.now()}-${index}`
-    }));
-  } catch (error: any) {
-    console.error("Gemini API Error:", error);
-    if (error.message?.includes('fetch')) {
-      throw new Error("فشل الاتصال بالخادم. يرجى التأكد من توفر الإنترنت ومحاولة الإرسال مجدداً.");
+    } catch (error: any) {
+      lastError = error;
+      console.error(`Attempt ${attempt + 1} failed:`, error);
+
+      // إذا كان الخطأ متعلقاً بالشبكة (Failed to fetch) نقوم بإعادة المحاولة
+      const isNetworkError = error.message?.includes('fetch') || error.name === 'TypeError';
+      
+      if (isNetworkError && attempt < maxRetries) {
+        // تأخير زمني متزايد: 1 ثانية ثم 2 ثانية
+        await delay(1000 * (attempt + 1));
+        continue;
+      }
+      
+      // إذا لم يكن خطأ شبكة أو استنفدنا المحاولات، نكسر الحلقة ونرمي الخطأ
+      break;
     }
-    throw error;
   }
+
+  // إذا وصلنا لهنا، فهذا يعني فشل جميع المحاولات
+  if (lastError?.message?.includes('fetch')) {
+    throw new Error("فشل الاتصال بالخادم الذكي. قد يكون السبب ضعف الإنترنت أو حجب الخدمة في منطقتك. يرجى تجربة الاتصال بشبكة أخرى أو استخدام VPN.");
+  }
+  
+  throw lastError || new Error("حدث خطأ غير متوقع أثناء معالجة البيانات.");
 };

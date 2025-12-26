@@ -193,14 +193,14 @@ const App: React.FC = () => {
     setError(null);
     try {
       if (!navigator.onLine) {
-        throw new Error("لا يوجد اتصال بالإنترنت حالياً. يرجى التحقق من الشبكة.");
+        throw new Error("جهازك غير متصل بالإنترنت حالياً.");
       }
       const newTransactions = await parseFinancialText(inputText);
       setTransactions(prev => [...prev, ...newTransactions]);
       setInputText('');
     } catch (err: any) {
-      console.error("Processing Error:", err);
-      setError(err.message || 'خطأ في الاتصال، يرجى التأكد من توفر الإنترنت والمحاولة لاحقاً');
+      console.error("Critical Processing Error:", err);
+      setError(err.message || 'حدث خطأ في الاتصال. يرجى التأكد من جودة الإنترنت أو استخدام VPN في حال كانت الخدمة محجوبة.');
     } finally {
       setLoading(false);
     }
@@ -306,12 +306,6 @@ const App: React.FC = () => {
     a.href = url;
     a.download = `backup_smart_accountant_${Date.now()}.json`;
     a.click();
-  };
-
-  const handleCopyDonation = () => {
-    const donationAcc = "0992262993";
-    navigator.clipboard.writeText(donationAcc);
-    alert('✅ تم نسخ رقم حساب الكاش الخاص بالمطور بنجاح.');
   };
 
   const handleWhatsAppDonationMessage = () => {
@@ -614,8 +608,8 @@ const App: React.FC = () => {
 
             {error && (
               <div className="mt-8 p-6 bg-rose-50 border border-rose-100 rounded-3xl text-rose-600 text-sm font-bold flex items-center gap-4 animate-fade-in">
-                <AlertCircle className="w-6 h-6" />
-                {error}
+                <AlertCircle className="w-6 h-6 shrink-0" />
+                <span className="flex-1">{error}</span>
               </div>
             )}
           </div>
